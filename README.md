@@ -133,4 +133,4 @@ Then visit `http://localhost:8000`.
 
 ---
 
-Made with ❤️ for the Hackathon · **AI Crowd & Safety Management at Railway Stations**
+**AI Crowd & Safety Management at Railway Stations**
