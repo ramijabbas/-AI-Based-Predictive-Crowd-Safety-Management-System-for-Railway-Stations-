@@ -124,13 +124,4 @@ Then visit `http://localhost:8000`.
 
 ---
 
-## 👩‍💻 Team
-
-- **Member 1 —** Computer Vision / Crowd Counting
-- **Member 2 —** Alert & Prediction Engine
-- **Member 3 —** Ticketing Correlation & Backend
-- **Member 4 —** Main Dashboard (this repository's focus)
-
----
-
 **AI Crowd & Safety Management at Railway Stations**
