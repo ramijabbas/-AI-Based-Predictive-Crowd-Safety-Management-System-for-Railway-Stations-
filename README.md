@@ -36,7 +36,7 @@ Using **existing CCTV camera footage + AI / computer vision**, RailVision provid
 
 ---
 
-## 🖥️ The Dashboard (Member 4 — Main Dashboard)
+## 🖥️ The Dashboard 
 
 The dashboard shown to the judges, built with **HTML + CSS + JavaScript (React-compatible single-file app)**.
 
