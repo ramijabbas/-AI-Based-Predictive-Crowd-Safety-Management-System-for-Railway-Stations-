@@ -376,10 +376,15 @@ class AlertManager:
 # ---------------------------------------------------------------------------
 # Drawing helpers
 # ---------------------------------------------------------------------------
-def draw_zone(frame, pts_px, is_alert=False):
+def draw_zone(frame, pts_px, is_alert=False, show_zone=False, calibrate_mode=False):
+    """Draw danger zone. By default hidden — only person boxes indicate intrusion.
+    Set show_zone=True or calibrate_mode=True to visualize the polygon."""
+    if not show_zone and not calibrate_mode:
+        return
+    # when hidden mode but we still want to hint during calibration/active debug, we draw faint
     overlay = frame.copy()
     color = INTRUSION_COLOR if is_alert else ZONE_COLOR
-    # fill semi-transparent
+    # fill semi-transparent only when explicitly shown
     if len(pts_px) >= 3:
         cv2.fillPoly(overlay, [pts_px], color)
         alpha = 0.30 if is_alert else 0.18
@@ -397,6 +402,127 @@ def draw_zone(frame, pts_px, is_alert=False):
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
         cv2.rectangle(frame, (cx - tw // 2 - 6, cy - th - 10), (cx + tw // 2 + 6, cy + 6), color, -1)
         cv2.putText(frame, label, (cx - tw // 2, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.55, TEXT_COLOR, 2)
+
+
+def auto_detect_track_zone(frame):
+    """Experimental: try to locate railway tracks via Canny + Hough.
+    Returns normalized polygon [[x,y],...] or None if not confident.
+    Heuristic: look for near-horizontal lines in lower 60% of frame."""
+    try:
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        roi_y0 = int(h * 0.40)
+        roi = blur[roi_y0:h, :]
+        edges = cv2.Canny(roi, 50, 150)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+        edges = cv2.dilate(edges, kernel, iterations=1)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80,
+                                 minLineLength=int(w * 0.25), maxLineGap=30)
+        if lines is None or len(lines) < 2:
+            return None
+        horiz = []
+        for x1, y1, x2, y2 in lines[:, 0]:
+            angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+            angle = min(angle, 180 - angle)
+            if angle < 35:  # near horizontal -> rail
+                y1 += roi_y0
+                y2 += roi_y0
+                if y1 > h * 0.45 and y2 > h * 0.45:  # must be in lower half
+                    horiz.append((x1, y1, x2, y2))
+        if len(horiz) < 2:
+            return None
+        ys = [y for l in horiz for y in (l[1], l[3])]
+        top_y = min(ys)
+        # clamp and add margin
+        top_y = int(max(h * 0.50, min(h * 0.85, top_y - 8)))
+        polygon = [[0.0, top_y / h], [1.0, top_y / h], [1.0, 1.0], [0.0, 1.0]]
+        print(f"[AUTO-TRACK] Detected rails top_y={top_y} ({top_y/h:.2f}), polygon={polygon}")
+        return polygon
+    except Exception as e:
+        print(f"[AUTO-TRACK] detection failed: {e}")
+        return None
+
+
+def is_track_present(frame, zone_pts_px=None):
+    """Check if railway tracks are actually visible in the current view.
+    Uses edge + Hough to look for at least 2 long parallel rail-like lines.
+    If zone_pts_px given, only checks inside that zone ROI.
+    Returns True if tracks likely visible, False otherwise (home/indoor -> False)."""
+    try:
+        h, w = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Determine ROI: zone polygon if given, else lower 60%
+        if zone_pts_px is not None and len(zone_pts_px) >= 3:
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillPoly(mask, [zone_pts_px], 255)
+            x, y, wb, hb = cv2.boundingRect(zone_pts_px)
+            # expand slightly to include rail edges
+            x = max(0, x - 5)
+            y = max(0, y - 5)
+            wb = min(w - x, wb + 10)
+            hb = min(h - y, hb + 10)
+            if wb < 20 or hb < 20:
+                return False
+            roi_blur = blur[y:y+hb, x:x+w]
+            roi_mask = mask[y:y+hb, x:x+w]
+            # apply mask to edges later, but for Canny we can mask after
+            edges = cv2.Canny(roi_blur, 50, 150)
+            edges = cv2.bitwise_and(edges, edges, mask=roi_mask)
+        else:
+            roi_y0 = int(h * 0.40)
+            roi_blur = blur[roi_y0:h, :]
+            edges = cv2.Canny(roi_blur, 50, 150)
+
+        # Dilate to connect rail edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+        edges = cv2.dilate(edges, kernel, iterations=1)
+
+        # Hough: look for long lines
+        # Use adaptive threshold based on ROI size to avoid false positives indoors
+        min_len = int(edges.shape[1] * 0.22)  # rail must be at least 22% of width
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=max(40, int(min(edges.shape[:2]) * 0.12)),
+                                 minLineLength=min_len, maxLineGap=18)
+        if lines is None:
+            return False
+
+        rail_candidates = []
+        for x1, y1, x2, y2 in lines[:, 0]:
+            length = np.hypot(x2 - x1, y2 - y1)
+            if length < min_len:
+                continue
+            angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+            angle = min(angle, 180 - angle)  # 0-90
+            # Rails are near-horizontal when viewed from platform side (0-35 deg)
+            # Allow slightly more for perspective (up to 40)
+            if angle < 38:
+                rail_candidates.append((x1, y1, x2, y2, length, angle))
+
+        # Need at least 2 strong parallel rails
+        if len(rail_candidates) < 2:
+            return False
+
+        # Additional check: ensure at least two candidates have similar angle (parallel) and vertical separation
+        # Sort by y
+        rail_candidates.sort(key=lambda l: (l[1] + l[3]) / 2)
+        for i in range(len(rail_candidates)):
+            for j in range(i+1, len(rail_candidates)):
+                y_i = (rail_candidates[i][1] + rail_candidates[i][3]) / 2
+                y_j = (rail_candidates[j][1] + rail_candidates[j][3]) / 2
+                angle_i = rail_candidates[i][5]
+                angle_j = rail_candidates[j][5]
+                if abs(angle_i - angle_j) > 12:  # must be parallel
+                    continue
+                if abs(y_i - y_j) < 10 or abs(y_i - y_j) > edges.shape[0] * 0.5:
+                    continue
+                # Found a pair of parallel rails separated vertically -> track present
+                return True
+        return False
+    except Exception as e:
+        print(f"[TRACK-CHECK] error: {e}")
+        return False
 
 
 def draw_tracks(frame, bboxes_dict, objects_dict, intruding_ids, confidences_map, zone_pts_px):
@@ -425,15 +551,23 @@ def draw_tracks(frame, bboxes_dict, objects_dict, intruding_ids, confidences_map
         cv2.putText(frame, label, (x1 + 3, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, TEXT_COLOR, 2)
 
 
-def draw_hud(frame, total_count, intruding_count, stable_count, fps, alert_manager, is_alert):
+def draw_hud(frame, total_count, intruding_count, stable_count, fps, alert_manager, is_alert, track_present=True):
     h, w = frame.shape[:2]
-    # top bar
-    cv2.rectangle(frame, (0, 0), (w, 48), HUD_BG, -1)
+    # top bar - taller if track not visible to show status
+    bar_h = 48 if track_present else 62
+    cv2.rectangle(frame, (0, 0), (w, bar_h), HUD_BG, -1)
     cv2.putText(frame, f"People: {total_count} (stable {stable_count})", (10, 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, BOX_COLOR, 2)
-    col = INTRUSION_COLOR if intruding_count > 0 else TEXT_COLOR
-    cv2.putText(frame, f"In TRACK zone: {intruding_count}", (10, 38),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
+    if track_present:
+        col = INTRUSION_COLOR if intruding_count > 0 else TEXT_COLOR
+        cv2.putText(frame, f"In TRACK zone: {intruding_count}", (10, 38),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, col, 2)
+    else:
+        # show that tracks not visible -> no alarms will trigger (prevents home false positives)
+        cv2.putText(frame, f"In TRACK zone: {intruding_count}  |  Tracks: NOT VISIBLE - monitoring paused", (10, 38),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 255, 255), 2)
+        cv2.putText(frame, f"Move camera to railway or press 'z' to calibrate zone", (10, 56),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 180, 180), 1)
 
     # right side FPS + alerts
     fps_text = f"FPS: {fps:.1f}"
@@ -445,10 +579,10 @@ def draw_hud(frame, total_count, intruding_count, stable_count, fps, alert_manag
     cv2.putText(frame, alert_text, (w - tw2 - 12, 38),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, INTRUSION_COLOR if alert_manager.total_alerts else TEXT_COLOR, 2)
 
-    # bottom help
-    help_text = "q/Esc:quit  z:calibrate zone  s:save zone  r:reset alerts  h:help"
+    # bottom help - note zone is now invisible, only persons show color
+    help_text = "q:quit  z:calibrate  v:toggle zone  s:save  r:reset  h:help | GREEN=safe  RED=on tracks"
     cv2.putText(frame, help_text, (10, h - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, TEXT_COLOR, 1)
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, TEXT_COLOR, 1)
     if is_alert:
         # flashing banner
         cv2.rectangle(frame, (0, h // 2 - 30), (w, h // 2 + 30), ALERT_BG, -1)
@@ -469,8 +603,11 @@ Examples:
   python people_counter.py --source rtsp://user:pass@ip/stream --zone-file track_zone.json
   python people_counter.py --source video.mp4 --zone "0.0,0.65 1.0,0.65 1.0,1.0 0.0,1.0" --alert-dir alerts
   python people_counter.py --source 0 --webhook-url https://example.com/hook --telegram-token 123:ABC --telegram-chat-id -100123
+  python people_counter.py --source 0 --auto-detect
+  python people_counter.py --source 0 --show-zone   # show red overlay (otherwise hidden: persons GREEN=safe RED=on tracks)
 
-Calibrate zone interactively: press 'z' then click polygon points on video, press ENTER to confirm, 's' to save.
+Zone is INVISIBLE by default — only person boxes are colored (GREEN safe, RED intrusion + alarm).
+Calibrate zone interactively: press 'z' then click polygon points on video, press ENTER to confirm, 's' to save, 'v' to toggle visibility.
         """
     )
     parser.add_argument("--source", default="0",
@@ -509,6 +646,14 @@ Calibrate zone interactively: press 'z' then click polygon points on video, pres
                         help="Run without display window (for servers / CCTV)")
     parser.add_argument("--calibrate", action="store_true",
                         help="Start in zone calibration mode")
+    parser.add_argument("--show-zone", action="store_true",
+                        help="Show danger zone overlay (default: hidden, only person boxes are colored)")
+    parser.add_argument("--auto-detect", action="store_true",
+                        help="Experimental: auto-detect railway tracks on first frame via edge/Hough (fallback to default zone)")
+    parser.add_argument("--no-track-check", action="store_true",
+                        help="Disable smart track presence check (by default, checks if rails are visible and pauses alarms if not — prevents home false alarms)")
+    parser.add_argument("--track-check-interval", type=int, default=15,
+                        help="Check for track presence every N frames (default: 15, lower=more responsive, higher=less CPU)")
     parser.add_argument("--prototxt", type=str, default="models/MobileNetSSD_deploy.prototxt",
                         help="Path to Caffe prototxt")
     parser.add_argument("--caffemodel", type=str, default="models/mobilenet.caffemodel",
@@ -587,6 +732,33 @@ def main():
     first_frame = None
     # init zone
     zone_pts_px, zone_norm = load_zone(args.zone_file, args.zone, w0, h0)
+    # auto-detect track zone if requested (experimental Hough-based)
+    if args.auto_detect:
+        # use the queued first frame for detection
+        auto_poly = auto_detect_track_zone(queued_frame)
+        if auto_poly is not None:
+            zone_norm = auto_poly
+            zone_pts_px = np.array([[int(x * w0), int(y * h0)] for x, y in zone_norm], dtype=np.int32)
+            print(f"[INFO] Auto-detected track zone applied: {zone_norm}")
+            # optionally save auto zone for reuse
+            # save_zone(save_zone_path, zone_norm)
+        else:
+            print("[INFO] Auto-detect found no confident tracks, keeping configured zone (invisible). Use 'z' to calibrate.")
+    # show_zone controls visibility; by default hidden to meet "only persons colored" requirement
+    show_zone = args.show_zone
+
+    # Smart track presence: if rails not visible (home), pause alarms to prevent false positives
+    if not args.no_track_check:
+        try:
+            _initial_track_present = is_track_present(queued_frame, zone_pts_px)
+            print(f"[TRACK-CHECK] Initial: {'TRACKS VISIBLE' if _initial_track_present else 'NO TRACKS (home?) - alarms will be suppressed until tracks appear / calibrate'}")
+        except Exception as e:
+            print(f"[TRACK-CHECK] initial check failed: {e}")
+            _initial_track_present = True
+        track_present_cached = _initial_track_present
+    else:
+        track_present_cached = True
+        print("[TRACK-CHECK] Disabled via --no-track-check (always assume tracks present)")
 
     tracker = CentroidTracker(max_disappeared=args.max_disappeared,
                               max_distance=args.max_distance)
@@ -636,14 +808,19 @@ def main():
     if not args.headless:
         cv2.namedWindow("People Detection - Railway Track", cv2.WINDOW_NORMAL)
         cv2.setMouseCallback("People Detection - Railway Track", mouse_cb)
-        print("""\n[CONTROLS]
+        track_check_status = "DISABLED" if args.no_track_check else f"ON (checks every {args.track_check_interval} frames, tracks {'VISIBLE' if track_present_cached else 'NOT visible - home? alarms paused'})"
+        print(f"""\n[CONTROLS]
   q / Esc  : quit
   z        : toggle zone calibration mode (click to add points)
   Enter    : confirm calibration (needs >=3 points)
   c        : clear calibration points
   s        : save current zone to file
+  v        : toggle zone visibility (currently {'ON' if show_zone else 'OFF - hidden, only persons colored'})
+  t        : toggle track presence check (currently {track_check_status})
   r        : reset alert counter
   h        : print help
+  Zone: INVISIBLE by design — GREEN= safe, RED= on tracks + alarm. Use --show-zone to show overlay or --auto-detect to try auto track find.
+  Smart track check: when NO tracks visible (home), all persons stay GREEN and no alarm.
         """)
 
     frame_idx = 0
@@ -719,9 +896,26 @@ def main():
                 else:
                     confidences_map[oid] = 0.5  # fallback
 
-        # intrusion check: foot point inside polygon
+        # --- Smart track presence check (prevents home false alarms) ---
+        # By default, if no rails are visible, all persons stay GREEN and no alarm fires.
+        # This is why user at home was incorrectly getting RED — now suppressed until tracks appear.
+        if not args.no_track_check:
+            # periodic check to save CPU; reuse cached result on other frames
+            if frame_idx % args.track_check_interval == 0:
+                try:
+                    track_present_cached = is_track_present(frame, zone_pts_px)
+                    if frame_idx % (args.track_check_interval * 6) == 0:  # log occasionally
+                        status = "VISIBLE" if track_present_cached else "NOT visible - alarms paused"
+                        print(f"[TRACK-CHECK] Frame {frame_idx}: {status}")
+                except Exception as e:
+                    print(f"[TRACK-CHECK] check failed: {e}")
+            track_present = track_present_cached
+        else:
+            track_present = True
+
+        # intrusion check: foot point inside polygon, ONLY if tracks are actually present
         intruding_ids = set()
-        if len(zone_pts_px) >= 3:
+        if track_present and len(zone_pts_px) >= 3:
             for oid, bbox in bboxes.items():
                 x1, y1, x2, y2 = bbox
                 cx = (x1 + x2) // 2
@@ -737,6 +931,9 @@ def main():
                         inside = True
                 if inside:
                     intruding_ids.add(oid)
+        elif not track_present:
+            # No tracks visible -> force no intrusion (persons stay GREEN)
+            intruding_ids = set()
 
         # detect *new* entries (was not intruding before, now is)
         new_entries = intruding_ids - prev_intruding_ids
@@ -775,12 +972,12 @@ def main():
         prev_time = now_time
 
         # Drawing
-        # zone
-        draw_zone(frame, zone_pts_px, is_alert=is_intrusion_active)
-        # tracks
+        # zone - hidden by default; only person boxes indicate status. Show if toggled or calibrating.
+        draw_zone(frame, zone_pts_px, is_alert=is_intrusion_active and track_present, show_zone=show_zone, calibrate_mode=calibrate_mode)
+        # tracks - GREEN safe, RED on tracks (intruding) — RED only if track_present
         draw_tracks(frame, bboxes, objects, intruding_ids, confidences_map, zone_pts_px)
-        # HUD including alert banner
-        draw_hud(frame, len(objects), len(intruding_ids), stable_count, fps, alert_mgr, is_alert=is_intrusion_active and (consecutive_intrusion_frames % 10 < 5))
+        # HUD including alert banner (show track presence)
+        draw_hud(frame, len(objects), len(intruding_ids), stable_count, fps, alert_mgr, is_alert=is_intrusion_active and track_present and (consecutive_intrusion_frames % 10 < 5), track_present=track_present)
 
         # calibration overlay
         if calibrate_mode:
@@ -842,6 +1039,18 @@ def main():
                     zone_norm = [list(map(float, p)) for p in calib_points_norm]
                     zone_pts_px = np.array([[int(x * w), int(y * h)] for x, y in zone_norm], dtype=np.int32)
                 save_zone(save_zone_path, zone_norm)
+            elif key == ord("v"):
+                show_zone = not show_zone
+                print(f"[INFO] Zone visibility {'ON' if show_zone else 'OFF (hidden, only persons colored)'}")
+            elif key == ord("t"):
+                args.no_track_check = not args.no_track_check
+                if args.no_track_check:
+                    print("[TRACK-CHECK] Disabled — will alarm whenever person inside zone (may cause home false alarms)")
+                    track_present_cached = True
+                else:
+                    # re-check
+                    track_present_cached = is_track_present(frame, zone_pts_px)
+                    print(f"[TRACK-CHECK] Enabled — tracks {'VISIBLE' if track_present_cached else 'NOT visible - alarms paused until tracks appear'}")
             elif key == ord("r"):
                 alert_mgr.total_alerts = 0
                 total_intrusion_events = 0
@@ -854,8 +1063,12 @@ def main():
   Enter : confirm polygon (>=3 points)
   c     : clear points (in calibration)
   s     : save zone to file
+  v     : toggle zone visibility (hidden by default: GREEN safe, RED on tracks)
   r     : reset alert counts
   h     : show this help
+  p     : pause
+  Zone is INVISIBLE by design — alarm + RED box = on tracks, GREEN box = safe.
+  Use --show-zone to start visible or --auto-detect to try auto rail finding.
                 """)
             elif key == ord("p"):
                 # pause
