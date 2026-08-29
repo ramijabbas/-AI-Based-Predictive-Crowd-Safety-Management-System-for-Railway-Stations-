@@ -1,0 +1,2 @@
+timestamp,event,num_intruders,ids,confidences,snapshot
+2026-08-28 10:47:01,TRACK_INTRUSION,2,0;1,1.00;0.81,C:\Users\jitsu\OneDrive\Desktop\People Detection\alerts_bus\intrusion_20260828_104701_618_TRACK.jpg

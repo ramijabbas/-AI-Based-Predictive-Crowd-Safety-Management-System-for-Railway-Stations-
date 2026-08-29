@@ -1,0 +1,21 @@
+{
+  "polygon": [
+    [0.0, 0.6],
+    [1.0, 0.6],
+    [1.0, 1.0],
+    [0.0, 1.0]
+  ],
+  "_comment": "Railway track danger zone as normalized 0-1 coordinates. Edit via interactive calibration: press 'z' to draw, ENTER to confirm, 's' to save. Or edit this file manually. Need at least 3 points forming a polygon.",
+  "_example_platform_edge": [
+    [0.0, 0.65],
+    [1.0, 0.65],
+    [1.0, 1.0],
+    [0.0, 1.0]
+  ],
+  "_example_full_bottom_half": [
+    [0.0, 0.5],
+    [1.0, 0.5],
+    [1.0, 1.0],
+    [0.0, 1.0]
+  ]
+}
