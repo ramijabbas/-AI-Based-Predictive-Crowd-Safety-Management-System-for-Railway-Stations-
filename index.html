@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>RailVision — AI Crowd &amp; Safety Management</title>
+<title>RailVision ΓÇö AI Crowd &amp; Safety Management</title>
 <style>
   :root {
     --bg: #0a0e21;
@@ -169,33 +169,33 @@
       </div>
       <div>
         <h1>Rail<span>Vision</span></h1>
-        <div class="tag">AI Crowd &amp; Safety Management · CCTV Behaviour Analytics</div>
+        <div class="tag">AI Crowd &amp; Safety Management ┬╖ CCTV Behaviour Analytics</div>
       </div>
     </div>
     <div class="header-right">
-      <div class="status-pill"><span class="dot"></span> LIVE · AI Monitor Active</div>
+      <div class="status-pill"><span class="dot"></span> LIVE ┬╖ AI Monitor Active</div>
     </div>
   </header>
 
   <!-- KPI cards -->
   <section class="kpis">
     <div class="kpi">
-      <div class="label">LIVE CROWD COUNT <span class="ico">👥</span></div>
+      <div class="label">LIVE CROWD COUNT <span class="ico">≡ƒæÑ</span></div>
       <div class="value" id="totalCount">--</div>
-      <div class="sub">across all platforms · <b id="kpiPct">--</b></div>
+      <div class="sub">across all platforms ┬╖ <b id="kpiPct">--</b></div>
     </div>
     <div class="kpi">
-      <div class="label">AVERAGE DENSITY <span class="ico">📊</span></div>
+      <div class="label">AVERAGE DENSITY <span class="ico">≡ƒôè</span></div>
       <div class="value" id="avgDensity">--<span style="font-size:16px">%</span></div>
       <div class="sub">nominal capacity usage</div>
     </div>
     <div class="kpi">
-      <div class="label">ACTIVE ALERTS <span class="ico">🔔</span></div>
+      <div class="label">ACTIVE ALERTS <span class="ico">≡ƒöö</span></div>
       <div class="value" id="alertCount">--</div>
       <div class="sub"><b id="critSub" class="r">--</b> critical</div>
     </div>
     <div class="kpi risk" id="riskKpi">
-      <div class="label">SYSTEM RISK LEVEL <span class="ico">🚨</span></div>
+      <div class="label">SYSTEM RISK LEVEL <span class="ico">≡ƒÜ¿</span></div>
       <div class="value" id="riskValue">--</div>
       <div class="sub" id="riskSub">--</div>
     </div>
@@ -236,9 +236,9 @@
 
     <!-- Prediction -->
     <div class="card">
-      <h3><span class="tint" style="background:var(--accent2)"></span> Crowd Forecast — Next 6 Hours</h3>
+      <h3><span class="tint" style="background:var(--accent2)"></span> Crowd Forecast ΓÇö Next 6 Hours</h3>
       <div id="predictionBars" class="pred-bars"></div>
-      <div class="pred-note" id="predNote">Loading forecast…</div>
+      <div class="pred-note" id="predNote">Loading forecastΓÇª</div>
     </div>
   </section>
 
@@ -253,7 +253,7 @@
       <div id="cctvFeed" style="border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.08);position:relative;">
         <canvas id="cctvCanvas" style="width:100%;display:block;background:#05070f;"></canvas>
         <div id="cctvOverlay" style="position:absolute;top:10px;left:12px;font-size:12px;color:#fff;text-shadow:0 1px 3px #000;display:flex;gap:16px;font-weight:600;">
-          <span id="cctvCam">CAM 07 · PLATFORM 3</span>
+          <span id="cctvCam">CAM 07 ┬╖ PLATFORM 3</span>
           <span id="cctvTime" style="color:var(--accent)"></span>
         </div>
         <div id="cctvStat" style="position:absolute;bottom:10px;left:12px;font-size:11px;color:#ffe27a;text-shadow:0 1px 3px #000;background:rgba(0,0,0,.4);padding:3px 9px;border-radius:6px;">AI TRACKING: <b id="cctvTrackCount">0</b> persons</div>
@@ -261,274 +261,149 @@
     </div>
   </section>
 
-  <div class="footer">RailVision · AI-powered predictive crowd &amp; safety management for Indian Railways · Demo simulation with realistic live data</div>
+  <div class="footer">RailVision ┬╖ AI-powered predictive crowd &amp; safety management for Indian Railways ┬╖ Demo simulation with realistic live data</div>
 </div>
 
 <script>
 (function(){
-  // ---------- Platform definitions ----------
-  const P = [
-    {n:'Platform 1', cap:600, base:0.45},
-    {n:'Platform 2', cap:600, base:0.62},
-    {n:'Platform 3', cap:680, base:0.78},
-    {n:'Platform 4', cap:680, base:0.58},
-    {n:'Platform 5', cap:520, base:0.4},
-    {n:'Platform 6', cap:520, base:0.3},
-    {n:'Platform 7', cap:700, base:0.5},
-    {n:'Platform 8', cap:700, base:0.66}
-  ];
-  const state = P.map(p => ({ dv: p.base + (Math.random()-0.5)*0.1, drift: (Math.random()-0.5)*0.4, cap: p.cap, base: p.base }));
-
-  // shared event/time
-  const now = new Date();
-  document.getElementById('cctvTime').textContent = now.toLocaleTimeString();
-  setInterval(()=>{ const d=new Date(); document.getElementById('cctvTime').textContent = d.toLocaleTimeString(); },1000);
-
-  // ---------- Helpers ----------
-  function level(dv){ if(dv>=0.85) return {cls:'st-r', label:'CRITICAL', color:getComputedStyle(document.body).getPropertyValue('--red')};
-    if(dv>=0.7) return {cls:'st-a', label:'HIGH', color:'#ffb020'};
-    if(dv>=0.5) return {cls:'st-a', label:'MODERATE', color:'#ffcf5c'};
-    return {cls:'st-g', label:'NORMAL', color:'#22d98a'}; }
-  function heatColor(dv){ if(dv>=0.85) return 'linear-gradient(160deg,#ff4d6a,#7a1f33)';
-    if(dv>=0.7) return 'linear-gradient(160deg,#ff8a2a,#a34b12)';
-    if(dv>=0.5) return 'linear-gradient(160deg,#ffd24d,#a87612)';
-    return 'linear-gradient(160deg,#2fd4ff,#0f4a63)'; }
-
   const $id = x => document.getElementById(x);
 
-  // ---------- Heatmap render ----------
-  function renderHeat(){
+  // No CCTV feed is connected ΓÇö show the dashboard in its "no data" / offline state.
+  // All panels render empty placeholders instead of live camera data.
+
+  const PLATFORM_COUNT = 8;
+
+  // ---------- Empty state helpers ----------
+  const EMPTY = 'ΓÇö';
+
+  function emptyHeat(){
     const box = $id('heatmap'); box.innerHTML='';
-    state.forEach((s,i)=>{
-      const lv=level(s.dv);
+    for(let i=0;i<PLATFORM_COUNT;i++){
       const cell=document.createElement('div');
-      cell.className='heat-cell'; cell.style.background=heatColor(s.dv);
+      cell.className='heat-cell';
+      cell.style.background='rgba(255,255,255,.04)';
       cell.innerHTML=`<span class="pno">P${i+1}</span>
         <div style="margin-top:6px;display:flex;justify-content:space-between;align-items:flex-end">
-          <span class="count">${Math.round(s.dv*s.cap)}</span><span class="dv">${Math.round(s.dv*100)}%</span>
+          <span class="count">${EMPTY}</span><span class="dv">NO DATA</span>
         </div>
-        <div class="bar"><i style="width:${s.dv*100}%"></i></div>`;
+        <div class="bar"><i style="width:0%"></i></div>`;
       box.appendChild(cell);
-    });
+    }
   }
 
-  // ---------- Platform list ----------
-  function renderPlatforms(){
+  function emptyPlatforms(){
     const box=$id('platformList'); box.innerHTML='';
-    const order=[...state.map((s,i)=>({s,i}))].sort((a,b)=>b.s.dv-a.s.dv);
-    order.forEach(({s,i})=>{
-      const lv=level(s.dv); const pct=Math.round(s.dv*100);
+    for(let i=0;i<PLATFORM_COUNT;i++){
       const row=document.createElement('div'); row.className='pf';
       row.innerHTML=`<div class="name">P${i+1}</div>
-        <div class="meter"><i style="width:${pct}%;background:${lv.color}"></i></div>
-        <div class="val">${pct}%</div>
-        <div class="state ${lv.cls}">${lv.label}</div>`;
+        <div class="meter"><i style="width:0%;background:#2a3356"></i></div>
+        <div class="val">${EMPTY}</div>
+        <div class="state st-g">OFFLINE</div>`;
       box.appendChild(row);
-    });
+    }
   }
 
-  // ---------- KPIs ----------
-  function renderKpis(){
-    const total = state.reduce((a,s)=>a+Math.round(s.dv*s.cap),0);
-    const avg = state.reduce((a,s)=>a+s.dv,0)/state.length;
-    $id('totalCount').textContent = total.toLocaleString();
-    const pct = total/(state.reduce((a,s)=>a+s.cap,0))*100;
-    $id('kpiPct').textContent = pct.toFixed(1)+'% of capacity';
-    $id('kpiPct').className = pct>70?'r':(pct>50?'a':'g');
-    $id('avgDensity').innerHTML = (avg*100).toFixed(0)+'<span style="font-size:16px">%</span>';
-    // risk
-    const max = Math.max(...state.map(s=>s.dv));
-    const riskKpi=$id('riskKpi'); const rv=$id('riskValue'); const rs=$id('riskSub');
-    riskKpi.classList.remove('ok','mod');
-    if(max>=0.85){ rv.textContent='CRITICAL'; rs.textContent='Immediate action required'; riskKpi.style=null; rv.style.color='var(--red)'; riskKpi.classList.add('mod'); }
-    else if(max>=0.7){ rv.textContent='HIGH'; rs.textContent='Heightened monitoring'; rv.style.color='var(--amber)'; riskKpi.classList.add('mod'); }
-    else if(max>=0.5){ rv.textContent='MODERATE'; rs.textContent='Normal supervision'; rv.style.color='var(--amber)'; riskKpi.classList.add('mod'); }
-    else { rv.textContent='LOW'; rs.textContent='All clear'; rv.style.color='var(--green)'; riskKpi.classList.add('ok'); riskKpi.style=null; }
+  function emptyKpis(){
+    $id('totalCount').textContent = EMPTY;
+    $id('kpiPct').textContent = 'no feed';
+    $id('avgDensity').innerHTML = EMPTY;
+    $id('alertCount').textContent = EMPTY;
+    $id('critSub').textContent = 'no feed';
+    $id('critSub').className='g';
+    const rv=$id('riskValue'); const rs=$id('riskSub');
+    $id('riskKpi').classList.remove('ok','mod');
+    rv.textContent='OFFLINE'; rs.textContent='No CCTV signal'; rv.style.color='var(--muted)';
   }
 
-  // ---------- Alerts ----------
-  const alertTypes=[
-    {lv:'e-crit', ico:'🚨', t:'Crowd overload', a:'', d:'Potential stampede risk detected', w:0},
-    {lv:'e-crit', ico:'⚠️', t:'Track incursion', a:'', d:'Person entered railway track zone', w:0},
-    {lv:'e-warn', ico:'💼', t:'Abandoned baggage', a:'', d:'Unattended bag > 8 min in concourse', w:0},
-    {lv:'e-warn', ico:'🏃', t:'Abnormal movement', a:'', d:'Sudden panic-like crowd movement', w:0},
-    {lv:'e-warn', ico:'🚉', t:'Unexpected platform change', a:'', d:'Train arriving at a high-density platform', w:0},
-    {lv:'e-crit', ico:'🔥', t:'Crush risk', a:'', d:'Density above 90% on restricted area', w:0},
-    {lv:'e-info', ico:'ℹ️', t:'Entry mismatch', a:'', d:'CCTV count exceeds ticketing count by 18%', w:0},
-  ];
-  const alertPool=[...alertTypes, ...alertTypes.slice(0,3)];
-  let activeAlerts=[];
-  function placeAlert(tp){
-    const i=1+Math.floor(Math.random()*6); const pf=state[Math.min(7, i-1)];
-    const a={lv:tp.lv,ico:tp.ico,t:tp.t,a:'P'+i,d:tp.d,time:new Date()};
-    activeAlerts.unshift(a);
-    if(activeAlerts.length>8) activeAlerts.pop();
-    renderAlerts();
-  }
-  function renderAlerts(){
-    const box=$id('alertsBox'); box.innerHTML='';
-    activeAlerts.forEach(a=>{
-      const el=document.createElement('div'); el.className='alert '+a.lv;
-      el.innerHTML=`<div class="aico">${a.ico}</div>
-        <div style="flex:1">
-          <div class="atitle">${a.t} <span style="color:var(--muted);font-weight:400;font-size:11.5px;margin-left:6px">${a.a}</span></div>
-          <div class="adesc">${a.d}</div>
-          <div class="atime">${a.time.toLocaleTimeString()}</div>
-        </div>`;
-      box.prepend(el);
-    });
-    // trim
-    while(box.children.length>6){ box.removeChild(box.lastChild); }
-    $id('alertCount').textContent = activeAlerts.length;
-    const crit = activeAlerts.filter(a=>a.lv==='e-crit').length;
-    $id('critSub').textContent = crit;
-    $id('critSub').className = crit>0?'r':'g';
-    $id('critSub').textContent = crit>0?crit+' critical':'no critical';
-  }
-
-  // ---------- Chart ----------
-  const chartCan=$id('densityChart');
-  const ctx=chartCan.getContext('2d');
-  let chartData=[]; let baseline=[];
-  function sizeChart(){ const r=chartCan.getBoundingClientRect(); const dpr=window.devicePixelRatio||1; chartCan.width=r.width*dpr; chartCan.height=r.height*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); }
-  window.addEventListener('resize',()=>{ sizeChart(); drawChart(); });
-  function drawChart(){
-    const w=chartCan.width/(window.devicePixelRatio||1), h=chartCan.height/(window.devicePixelRatio||1);
+  function emptyChart(){
+    const chartCan=$id('densityChart');
+    const ctx=chartCan.getContext('2d');
+    const dpr=window.devicePixelRatio||1;
+    const r=chartCan.getBoundingClientRect();
+    chartCan.width=r.width*dpr; chartCan.height=r.height*dpr;
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    const w=r.width, h=r.height;
     ctx.clearRect(0,0,w,h);
-    const n=Math.max(chartData.length,1);
-    const pad=30;
-    const plotW=w-pad-14, plotH=h-pad-16;
-    const maxY=100;
-    // grid + labels
-    ctx.font='10px Segoe UI'; ctx.textAlign='right'; ctx.fillStyle='#95a0c8'; ctx.lineWidth=1;
+    // faint grid only, no data line
+    ctx.font='10px Segoe UI'; ctx.textAlign='right'; ctx.fillStyle='#95a0c8';
     for(let g=0; g<=4; g++){
-      const gy=pad+ (plotH)*(1-g/4);
+      const gy=30+ (h-56)*(1-g/4);
       ctx.strokeStyle='rgba(255,255,255,.06)';
       ctx.beginPath(); ctx.moveTo(30,gy); ctx.lineTo(w-14,gy); ctx.stroke();
-      ctx.fillText(Math.round(maxY*g/4)+'%', 28, gy+3);
+      ctx.fillText(Math.round(100*g/4)+'%', 28, gy+3);
     }
-    function drawLine(data,color,width){
-      ctx.strokeStyle=color; ctx.lineWidth=width; ctx.lineJoin='round'; ctx.beginPath();
-      data.forEach((v,i)=>{ const x=30+(i/(n-1))*plotW; const y=pad+plotH*(1-v/1); if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y); });
-      ctx.stroke();
-    }
-    if(chartData.length<2){ ctx.fillStyle='#95a0c8'; ctx.fillText('Collecting live data…', 40, pad+40); return; }
-    drawLine(baseline,'#95a0c8',1.5);
-    // fill
-    ctx.lineTo(w-14, pad+plotH); ctx.lineTo(30,pad+plotH); ctx.closePath();
-    const grad=ctx.createLinearGradient(0,pad,0,pad+plotH); grad.addColorStop(0,'rgba(47,212,255,.28)'); grad.addColorStop(1,'rgba(47,212,255,0)');
-    ctx.fillStyle=grad;
-    // redraw line with fill under current average line
-    const cur=chartData.map(v=>v);
-    ctx.beginPath();
-    cur.forEach((v,i)=>{ const x=30+(i/(n-1))*plotW; const y=pad+plotH*(1-v/1); if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y); });
-    ctx.lineTo(30+( (cur.length-1)/(Math.max(cur.length-1,1))*plotW ), pad+plotH); ctx.lineTo(30,pad+plotH); ctx.closePath(); ctx.fill();
-    drawLine(chartData,'#2fd4ff',2.5);
-  }
-  // chart baseline = normal peak
-  baseline = Array.from({length:60},()=>0.55);
-  function tickChart(){
-    const avg = state.reduce((a,s)=>a+s.dv,0);
-    chartData.push(avg);
-    if(chartData.length>60) chartData.shift();
-    drawChart();
+    ctx.textAlign='center'; ctx.fillStyle='#5b6585';
+    ctx.fillText('Waiting for CCTV feedΓÇª', w/2, h/2);
   }
 
-  // ---------- Prediction ----------
-  function renderPrediction(){
+  function emptyPrediction(){
     const hours=['-2h','-1h','Now','+1h','+2h','+3h','+4h','+5h','+6h'];
-    // build a smooth wave for upcoming (festival build-up)
-    const nowVal = state.reduce((a,s)=>a+s.dv,0)/state.length;
-    const wave = [nowVal*0.9, nowVal*0.96, nowVal, nowVal*1.06, nowVal*1.14, nowVal*1.22, nowVal*1.3, nowVal*1.34, nowVal*1.36];
     const box=$id('predictionBars'); box.innerHTML='';
-    const max=Math.max(...wave);
-    wave.forEach((v,i)=>{
-      const pct=Math.max(6, v/max*100);
-      const b=document.createElement('div'); b.className='pred-bar'+(i===2?' now':'');
-      b.innerHTML=`<div class="pill" style="height:${pct}%"></div><div class="t">${hours[i]}</div>`;
+    hours.forEach((t)=>{
+      const b=document.createElement('div'); b.className='pred-bar';
+      b.innerHTML=`<div class="pill" style="height:2%;background:#2a3356"></div><div class="t">${t}</div>`;
       box.appendChild(b);
     });
-    const peak = wave.indexOf(Math.max(...wave));
-    $id('predNote').innerHTML = `📈 <b>Forecast:</b> Crowd expected to peak at <b>${hours[peak]}</b> due to festival rush. Recommend — deploy ${4} extra staff, reserve <b>Platform ${3+((Math.floor(Math.random()*3)+1)%3)}</b>, and schedule 2 additional trains.`;
+    $id('predNote').innerHTML = '≡ƒôí No data available ΓÇö forecast requires historical & live crowd data.';
   }
 
-  // ---------- Safety monitors ----------
-  const cams=[
-    {ico:'🚶', n:'Track Incursion Detection', s:'Monitoring track intrusion perimeter', st:'ok', badge:'NORMAL'},
-    {ico:'💼', n:'Abandoned Baggage Detection', s:'20 CCTV zones under watch', st:'warn', badge:'1 CASE'},
-    {ico:'🏃', n:'Abnormal/Panic Movement', s:'Flow & velocity anomaly analysis', st:'ok', badge:'NORMAL'},
-    {ico:'👥', n:'Real-time People Counting', s:'Deep learning people counter', st:'ok', badge:'ACTIVE'},
-    {ico:'🎫', n:'Ticketing Correlation', s:'Matching CCTV count vs ticket entry', st:'warn', badge:'18% GAP'},
-  ];
-  function renderCams(){
+  function emptyAlerts(){
+    const box=$id('alertsBox'); box.innerHTML='';
+    const empty=document.createElement('div'); empty.className='alert e-info';
+    empty.style.borderColor='var(--accent)';
+    empty.innerHTML=`<div class="aico">≡ƒô┤</div>
+      <div style="flex:1">
+        <div class="atitle">No active alerts</div>
+        <div class="adesc">System is online but awaiting CCTV feed. Alerts will appear here once cameras are connected.</div>
+      </div>`;
+    box.appendChild(empty);
+  }
+
+  function emptyCams(){
     const box=$id('camsBox'); box.innerHTML='';
-    cams.forEach(c=>{
+    const modules=[
+      'Track Incursion Detection','Abandoned Baggage Detection','Abnormal / Panic Movement',
+      'Real-time People Counting','Ticketing Correlation'
+    ];
+    modules.forEach(n=>{
       const el=document.createElement('div'); el.className='cam';
-      el.innerHTML=`<div class="cico">${c.ico}</div><div class="cmeta"><div class="cn">${c.n}</div><div class="cs">${c.s}</div></div>
-        <div class="cbadge cb-${c.st}">${c.badge}</div>`;
+      el.innerHTML=`<div class="cico">≡ƒ¢░∩╕Å</div><div class="cmeta"><div class="cn">${n}</div><div class="cs">Awaiting CCTV signal</div></div>
+        <div class="cbadge cb-ok">NO FEED</div>`;
       box.appendChild(el);
     });
   }
 
-  // ---------- CCTV feed ----------
-  const ct=$id('cctvCanvas'); const cctx=ct.getContext('2d');
-  let cameraIndex=2; // platform 3
-  function sizeCctv(){ const w=ct.parentElement.clientWidth; const h=Math.min(280, w*0.6); ct.width=w; ct.height=h; }
-  function drawCctv(){
-    const w=ct.width,h=ct.height;
-    cctx.fillStyle='#05070f'; cctx.fillRect(0,0,w,h);
-    const s=state[cameraIndex];
-    $id('cctvCam').textContent='CAM 0'+(cameraIndex+6)+' · PLATFORM '+(cameraIndex+1);
-    // grid overlay
-    cctx.strokeStyle='rgba(47,212,255,.12)'; cctx.lineWidth=1;
+  // ---------- CCTV feed: no signal ----------
+  function drawNoSignal(){
+    const ct=$id('cctvCanvas'); const cctx=ct.getContext('2d');
+    const w=ct.parentElement.clientWidth, h=Math.min(280, w*0.6);
+    ct.width=w; ct.height=h;
+    cctx.fillStyle='#0a0d18'; cctx.fillRect(0,0,w,h);
+    cctx.strokeStyle='rgba(255,255,255,.12)'; cctx.lineWidth=1;
     for(let i=1;i<8;i++){ cctx.beginPath(); cctx.moveTo(w*i/8,0); cctx.lineTo(w*i/8,h); cctx.stroke(); cctx.beginPath(); cctx.moveTo(0,h*i/6); cctx.lineTo(w,h*i/6); cctx.stroke(); }
-    // floor perspective lines
-    cctx.strokeStyle='rgba(255,255,255,.06)';
-    for(let i=0;i<10;i++){ cctx.beginPath(); cctx.moveTo(w/2, 0); cctx.lineTo(i*w/9, h); cctx.stroke(); }
-    // people blobs
-    const n=Math.round(s.dv*24);
-    for(let i=0;i<n;i++){
-      const x=w* (0.08 + Math.random()*0.84);
-      const r=Math.random();
-      const y=h*(0.35 + r*0.55);
-      const size=8+r*14;
-      cctx.beginPath(); cctx.arc(x,y,size,0,Math.PI*2);
-      cctx.fillStyle = Math.random()<0.4 ? 'rgba(255,176,32,.35)' : 'rgba(47,212,255,.28)';
-      cctx.fill();
-      // box
-      cctx.strokeStyle='rgba(34,217,138,.5)'; cctx.lineWidth=1;
-      cctx.strokeRect(x-size, y-size, size*2, size*2);
-    }
-    $id('cctvTrackCount').textContent=n;
-    // warning tint if high
-    if(s.dv>0.8){ cctx.strokeStyle='rgba(255,77,106,.5)'; cctx.lineWidth=5; cctx.strokeRect(2,2,w-4,h-4); }
+    cctx.font='12px Segoe UI'; cctx.textAlign='center'; cctx.fillStyle='#7a86b3';
+    cctx.fillText('NO SIGNAL', w/2, h/2-6);
+    cctx.font='10px Segoe UI'; cctx.fillText('Connect CCTV camera to begin monitoring', w/2, h/2+12);
   }
 
-  // ---------- Simulation engine ----------
-  function step(){
-    state.forEach(s=>{
-      s.drift = s.drift*0.96 + (Math.random()-0.5)*0.06;
-      s.dv = Math.min(1.05, Math.max(0.12, s.dv + s.drift*0.02));
-    });
-    renderHeat(); renderPlatforms(); renderKpis(); tickChart(); drawCctv();
-  }
-  function randomAlert(){
-    const w=Math.random();
-    if(w<0.28) placeAlert(alertPool[Math.floor(Math.random()*alertPool.length)]);
+  // ---------- Offline banner ----------
+  function offlineBanner(){
+    const pill=document.querySelector('.dot'); if(pill) pill.style.background='var(--red)';
+    const sp=document.querySelector('.status-pill');
+    if(sp){
+      sp.innerHTML='<span class="dot" style="background:var(--red)"></span> OFFLINE ┬╖ NO CCTV FEED';
+      sp.style.background='rgba(255,77,106,.12)';
+      sp.style.borderColor='rgba(255,77,106,.35)';
+    }
+    const tag=document.querySelector('.brand .tag');
+    if(tag) tag.textContent='AI Crowd & Safety Management ┬╖ No camera connected';
+    const footer=document.querySelector('.footer');
+    if(footer) footer.textContent='RailVision ┬╖ AI-powered predictive crowd & safety management for Indian Railways';
   }
 
   // ---------- Init ----------
-  sizeChart(); sizeCctv();
-  window.addEventListener('resize', ()=>{ sizeCctv(); sizeChart(); });
-  renderHeat(); renderPlatforms(); renderKpis(); renderCams(); renderPrediction();
-  activeAlerts=[ alertTypes[0] ];
-  activeAlerts[0].a='P3'; activeAlerts[0].time=new Date();
-  renderAlerts();
-  setInterval(step, 1500);
-  setInterval(randomAlert, 2200);
-  setInterval(renderPrediction, 20000);
-  // rotate camera view
-  setInterval(()=>{ cameraIndex=(cameraIndex+1)%8; }, 4000);
+  window.addEventListener('resize', drawNoSignal);
+  emptyHeat(); emptyPlatforms(); emptyKpis(); emptyChart(); emptyPrediction(); emptyAlerts(); emptyCams(); drawNoSignal(); offlineBanner();
 })();
 </script>
 </body>
