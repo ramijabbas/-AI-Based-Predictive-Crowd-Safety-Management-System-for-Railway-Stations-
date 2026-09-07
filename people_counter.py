@@ -29,6 +29,10 @@ HUD_BG = (30, 30, 30)
 ZONE_COLOR = (0, 0, 255)
 ZONE_FILL = (0, 0, 255)
 ALERT_BG = (0, 0, 255)
+# Density colors (BGR) matching image: Normal green, High yellow, Extremely red
+DENSITY_NORMAL_COLOR = (0, 255, 0)
+DENSITY_HIGH_COLOR = (0, 255, 255)  # yellow
+DENSITY_EXTREME_COLOR = (0, 0, 255)
 
 DEFAULT_ZONE_NORM = [[0.0, 0.60], [1.0, 0.60], [1.0, 1.0], [0.0, 1.0]]  # bottom 40% as track
 
@@ -176,9 +180,33 @@ def save_zone(zone_file, norm_polygon):
 
 
 # ---------------------------------------------------------------------------
-# Detection
+# Detection (body-based - works even when face hidden)
 # ---------------------------------------------------------------------------
-def detect_people(frame, net, confidence, nms_threshold=0.4):
+# HOG fallback for body detection when face is hidden/occluded
+_hog = None
+def _get_hog():
+    global _hog
+    if _hog is None:
+        _hog = cv2.HOGDescriptor()
+        _hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+    return _hog
+
+def detect_people_hog(frame, hit_threshold=0.0):
+    """Fallback body detector using HOG - detects full body silhouette, not face."""
+    hog = _get_hog()
+    # winStride and padding tuned for 640x480
+    rects, weights = hog.detectMultiScale(frame, winStride=(8, 8), padding=(8, 8), scale=1.05, hitThreshold=hit_threshold)
+    out = []
+    for i, (x, y, w, h) in enumerate(rects):
+        # HOG returns loose boxes, shrink slightly
+        pad_w, pad_h = int(0.1 * w), int(0.07 * h)
+        x1, y1, x2, y2 = x + pad_w, y + pad_h, x + w - pad_w, y + h - pad_h
+        # HOG weight as confidence 0.4-0.8 range
+        conf = float(np.clip(weights[i][0] * 0.5 + 0.5, 0.35, 0.95)) if i < len(weights) else 0.5
+        out.append(((x1, y1, x2, y2), conf))
+    return out
+
+def detect_people(frame, net, confidence, nms_threshold=0.4, use_hog_fallback=True, hog_threshold=-0.5):
     h, w = frame.shape[:2]
     blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)),
                                  0.007843, (300, 300), 127.5)
@@ -212,6 +240,38 @@ def detect_people(frame, net, confidence, nms_threshold=0.4):
             for i in indices:
                 x1, y1, x2, y2 = boxes[i]
                 kept.append(((x1, y1, x2, y2), confidences[i]))
+
+    # --- Body-based fallback (face hidden): HOG detects silhouette, not face ---
+    # MobileNetSSD 'person' is already body-based and should work when face hidden,
+    # but if confidence drops (occlusion) HOG can rescue. Only run if needed to save CPU.
+    if use_hog_fallback:
+        # Run HOG when SSD found 0 or when body may be partially occluded (face hidden)
+        # We run every frame but merge only non-duplicate boxes
+        try:
+            # HOG works best at 640x480, scale already in detect
+            hog_dets = detect_people_hog(frame, hit_threshold=hog_threshold)
+            # keep HOG boxes with reasonable confidence
+            hog_filtered = [(b, c) for b, c in hog_dets if c > max(0.35, confidence * 0.85)]
+            for hb, hc in hog_filtered:
+                duplicate = False
+                for kb, _ in kept:
+                    # IoU check
+                    ix1, iy1 = max(hb[0], kb[0]), max(hb[1], kb[1])
+                    ix2, iy2 = min(hb[2], kb[2]), min(hb[3], kb[3])
+                    inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+                    area_h = (hb[2] - hb[0]) * (hb[3] - hb[1])
+                    area_k = (kb[2] - kb[0]) * (kb[3] - kb[1])
+                    iou = inter / (area_h + area_k - inter + 1e-6)
+                    if iou > 0.35:
+                        duplicate = True
+                        break
+                if not duplicate:
+                    # Also filter tiny boxes
+                    if hb[2] - hb[0] > 20 and hb[3] - hb[1] > 40:
+                        kept.append((hb, hc))
+        except Exception as e:
+            # HOG may fail on small frames
+            pass
     return kept
 
 
@@ -405,39 +465,75 @@ def draw_zone(frame, pts_px, is_alert=False, show_zone=False, calibrate_mode=Fal
 
 
 def auto_detect_track_zone(frame):
-    """Experimental: try to locate railway tracks via Canny + Hough.
-    Returns normalized polygon [[x,y],...] or None if not confident.
-    Heuristic: look for near-horizontal lines in lower 60% of frame."""
+    """Locate railway tracks like the image (diagonal ballast + 2 rails + sleepers).
+    Analyzes lower 60% for parallel rails; returns rectangle polygon or None."""
     try:
         h, w = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
-        roi_y0 = int(h * 0.40)
+        roi_y0 = int(h * 0.35)
         roi = blur[roi_y0:h, :]
         edges = cv2.Canny(roi, 50, 150)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
         edges = cv2.dilate(edges, kernel, iterations=1)
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=80,
-                                 minLineLength=int(w * 0.25), maxLineGap=30)
+        # Lower threshold to catch dark metallic rails on ballast (image rails are dark, high contrast)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=70,
+                                 minLineLength=int(w * 0.35), maxLineGap=25)
         if lines is None or len(lines) < 2:
             return None
-        horiz = []
+        # Rails in image are diagonal ~ 5-20 deg from horizontal (perspective)
+        rails = []
         for x1, y1, x2, y2 in lines[:, 0]:
             angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
             angle = min(angle, 180 - angle)
-            if angle < 35:  # near horizontal -> rail
+            length = np.hypot(x2 - x1, y2 - y1)
+            # Image rails: long (>35% width), near-horizontal 0-25 deg (diagonal due to perspective)
+            if angle < 25 and length > w * 0.30:
                 y1 += roi_y0
                 y2 += roi_y0
-                if y1 > h * 0.45 and y2 > h * 0.45:  # must be in lower half
-                    horiz.append((x1, y1, x2, y2))
-        if len(horiz) < 2:
+                if y1 > h * 0.35 and y2 > h * 0.35:
+                    rails.append((x1, y1, x2, y2, angle))
+        if len(rails) < 2:
             return None
-        ys = [y for l in horiz for y in (l[1], l[3])]
+        # Verify rails are roughly parallel and on ballast texture (HSV check)
+        # Ballast check: low saturation gravel in ROI
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        roi_hsv = hsv[roi_y0:h, :]
+        # Ballast: S 0-45, V 45-135 (dark gray gravel like image); track image has ~30% ballast
+        ballast_mask = cv2.inRange(roi_hsv, np.array([0, 0, 45]), np.array([180, 45, 135]))
+        ballast_ratio = cv2.countNonZero(ballast_mask) / (roi_hsv.shape[0] * roi_hsv.shape[1])
+        if ballast_ratio < 0.06:
+            return None
+        # Also need sleeper-like light patches (sleeper color in image: light beige V 180-255, S 0-30)
+        sleeper_mask = cv2.inRange(hsv, np.array([10, 0, 160]), np.array([35, 35, 255]))
+        # Count in lower ROI only
+        sleeper_roi = sleeper_mask[roi_y0:h, :]
+        sleeper_ratio = cv2.countNonZero(sleeper_roi) / sleeper_roi.size
+        # Shape check: sleepers are small rectangles, spaced regularly perpendicular to rails
+        contours, _ = cv2.findContours(sleeper_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        sleeper_rects = 0
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 180 or area > 6000:
+                continue
+            cx, cy, cw, ch = cv2.boundingRect(cnt)
+            aspect = max(cw, ch) / (min(cw, ch) + 1e-6)
+            # sleeper in image: ~ 40x10 (aspect 4) or vertical 10x40, not square
+            if 2.2 < aspect < 10 and min(cw, ch) > 6:
+                sleeper_rects += 1
+        # Require BOTH ballast and sleepers for this image type; road has ballast but no rectangular sleepers -> rejected
+        if ballast_ratio < 0.08 or sleeper_rects < 3:
+            return None
+        ys = [y for _, y, _, y2, _ in rails for y in (y, y2)]
         top_y = min(ys)
-        # clamp and add margin
-        top_y = int(max(h * 0.50, min(h * 0.85, top_y - 8)))
-        polygon = [[0.0, top_y / h], [1.0, top_y / h], [1.0, 1.0], [0.0, 1.0]]
-        print(f"[AUTO-TRACK] Detected rails top_y={top_y} ({top_y/h:.2f}), polygon={polygon}")
+        # For diagonal image, top is near 0.3-0.35 (far side), we keep that (not clamped to 0.5)
+        top_y = int(max(h * 0.28, min(h * 0.65, top_y - 6)))
+        bottom_y = h - 2
+        # Create perspective-aware polygon: for diagonal tracks, allow slightly trapezoidal
+        # Use rail extents to estimate left/right at top vs bottom
+        # Simple: rectangle as before, but tighter to ballast
+        polygon = [[0.02, top_y / h], [0.98, top_y / h], [0.98, bottom_y / h], [0.02, bottom_y / h]]
+        print(f"[AUTO-TRACK] Image-like rails: {len(rails)} rails, ballast {ballast_ratio:.2f}, sleeper {sleeper_ratio:.2f}, top_y={top_y} ({top_y/h:.2f})")
         return polygon
     except Exception as e:
         print(f"[AUTO-TRACK] detection failed: {e}")
@@ -445,79 +541,113 @@ def auto_detect_track_zone(frame):
 
 
 def is_track_present(frame, zone_pts_px=None):
-    """Check if railway tracks are actually visible in the current view.
-    Uses edge + Hough to look for at least 2 long parallel rail-like lines.
-    If zone_pts_px given, only checks inside that zone ROI.
-    Returns True if tracks likely visible, False otherwise (home/indoor -> False)."""
+    """Check if tracks like the image (ballast + 2 parallel rails + sleepers) are visible.
+    Multi-cue: rail lines + ballast color + sleeper texture. Home/indoor -> False."""
     try:
         h, w = frame.shape[:2]
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        # Determine ROI: zone polygon if given, else lower 60%
+        # Quick HSV ballast/sleeper pre-check (image has dark ballast + light sleepers)
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        # Ballast in image: dark gray gravel, low S
+        ballast_low, ballast_high = np.array([0, 0, 40]), np.array([180, 50, 140])
+        sleeper_low, sleeper_high = np.array([10, 0, 155]), np.array([35, 40, 255])
         if zone_pts_px is not None and len(zone_pts_px) >= 3:
             mask = np.zeros((h, w), dtype=np.uint8)
             cv2.fillPoly(mask, [zone_pts_px], 255)
             x, y, wb, hb = cv2.boundingRect(zone_pts_px)
-            # expand slightly to include rail edges
-            x = max(0, x - 5)
-            y = max(0, y - 5)
-            wb = min(w - x, wb + 10)
-            hb = min(h - y, hb + 10)
+            x = max(0, x - 5); y = max(0, y - 5)
+            wb = min(w - x, wb + 10); hb = min(h - y, hb + 10)
             if wb < 20 or hb < 20:
                 return False
-            roi_blur = blur[y:y+hb, x:x+w]
-            roi_mask = mask[y:y+hb, x:x+w]
-            # apply mask to edges later, but for Canny we can mask after
+            roi_hsv = hsv[y:y+hb, x:x+wb]
+            roi_mask = mask[y:y+hb, x:x+wb]
+            # count ballast only inside zone
+            ballast = cv2.inRange(roi_hsv, ballast_low, ballast_high)
+            ballast = cv2.bitwise_and(ballast, ballast, mask=roi_mask)
+            ballast_ratio = cv2.countNonZero(ballast) / (wb * hb) if wb*hb>0 else 0
+            sleeper = cv2.inRange(roi_hsv, sleeper_low, sleeper_high)
+            sleeper = cv2.bitwise_and(sleeper, sleeper, mask=roi_mask)
+            sleeper_ratio = cv2.countNonZero(sleeper) / (wb * hb) if wb*hb>0 else 0
+            # Need BOTH ballast and sleepers like the image — shape check for sleepers
+            contours, _ = cv2.findContours(sleeper, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            sleeper_rects = 0
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < 180 or area > 6000:
+                    continue
+                cx, cy, cw, ch = cv2.boundingRect(cnt)
+                aspect = max(cw, ch) / (min(cw, ch) + 1e-6)
+                if 2.2 < aspect < 10 and min(cw, ch) > 6:
+                    sleeper_rects += 1
+            if ballast_ratio < 0.06 or sleeper_rects < 3:
+                return False
+            # For edge detection, use masked gray
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
+            roi_blur = blur[y:y+hb, x:x+wb]
+            roi_mask2 = roi_mask
             edges = cv2.Canny(roi_blur, 50, 150)
-            edges = cv2.bitwise_and(edges, edges, mask=roi_mask)
+            edges = cv2.bitwise_and(edges, edges, mask=roi_mask2)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+            edges = cv2.dilate(edges, kernel, iterations=1)
+            min_len = int(wb * 0.28)
+            thr = max(35, int(min(wb, hb) * 0.10))
         else:
-            roi_y0 = int(h * 0.40)
+            # No zone: check lower 65% where tracks appear in image (diagonal from mid)
+            roi_y0 = int(h * 0.35)
+            roi_hsv = hsv[roi_y0:h, :]
+            ballast = cv2.inRange(roi_hsv, ballast_low, ballast_high)
+            ballast_ratio = cv2.countNonZero(ballast) / ballast.size if ballast.size>0 else 0
+            sleeper = cv2.inRange(roi_hsv, sleeper_low, sleeper_high)
+            sleeper_ratio = cv2.countNonZero(sleeper) / sleeper.size if sleeper.size>0 else 0
+            # Image has ~25% ballast + rectangular sleepers, home has <5%, road has ballast but no rectangular sleepers
+            contours, _ = cv2.findContours(sleeper, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            sleeper_rects = 0
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if area < 180 or area > 6000:
+                    continue
+                cx, cy, cw, ch = cv2.boundingRect(cnt)
+                aspect = max(cw, ch) / (min(cw, ch) + 1e-6)
+                if 2.2 < aspect < 10 and min(cw, ch) > 6:
+                    sleeper_rects += 1
+            if ballast_ratio < 0.08 or sleeper_rects < 3:
+                return False
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            blur = cv2.GaussianBlur(gray, (5, 5), 0)
             roi_blur = blur[roi_y0:h, :]
             edges = cv2.Canny(roi_blur, 50, 150)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
+            edges = cv2.dilate(edges, kernel, iterations=1)
+            min_len = int(edges.shape[1] * 0.30)
+            thr = max(40, int(min(edges.shape[:2]) * 0.12))
 
-        # Dilate to connect rail edges
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 3))
-        edges = cv2.dilate(edges, kernel, iterations=1)
-
-        # Hough: look for long lines
-        # Use adaptive threshold based on ROI size to avoid false positives indoors
-        min_len = int(edges.shape[1] * 0.22)  # rail must be at least 22% of width
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=max(40, int(min(edges.shape[:2]) * 0.12)),
-                                 minLineLength=min_len, maxLineGap=18)
-        if lines is None:
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=thr,
+                                 minLineLength=min_len, maxLineGap=20)
+        if lines is None or len(lines) < 2:
             return False
-
-        rail_candidates = []
+        # Filter rail candidates: long, near-horizontal/diagonal as in image (0-25 deg)
+        rails = []
         for x1, y1, x2, y2 in lines[:, 0]:
             length = np.hypot(x2 - x1, y2 - y1)
             if length < min_len:
                 continue
             angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
-            angle = min(angle, 180 - angle)  # 0-90
-            # Rails are near-horizontal when viewed from platform side (0-35 deg)
-            # Allow slightly more for perspective (up to 40)
-            if angle < 38:
-                rail_candidates.append((x1, y1, x2, y2, length, angle))
-
-        # Need at least 2 strong parallel rails
-        if len(rail_candidates) < 2:
+            angle = min(angle, 180 - angle)
+            if angle < 28:  # image rails are ~5-18 deg diagonal
+                rails.append((x1, y1, x2, y2, length, angle))
+        if len(rails) < 2:
             return False
-
-        # Additional check: ensure at least two candidates have similar angle (parallel) and vertical separation
-        # Sort by y
-        rail_candidates.sort(key=lambda l: (l[1] + l[3]) / 2)
-        for i in range(len(rail_candidates)):
-            for j in range(i+1, len(rail_candidates)):
-                y_i = (rail_candidates[i][1] + rail_candidates[i][3]) / 2
-                y_j = (rail_candidates[j][1] + rail_candidates[j][3]) / 2
-                angle_i = rail_candidates[i][5]
-                angle_j = rail_candidates[j][5]
-                if abs(angle_i - angle_j) > 12:  # must be parallel
+        # Must have at least 2 parallel rails with vertical separation (like 2 rails per track)
+        rails.sort(key=lambda l: (l[1] + l[3]) / 2)
+        for i in range(len(rails)):
+            for j in range(i+1, len(rails)):
+                y_i = (rails[i][1] + rails[i][3]) / 2
+                y_j = (rails[j][1] + rails[j][3]) / 2
+                if abs(rails[i][5] - rails[j][5]) > 10:
                     continue
-                if abs(y_i - y_j) < 10 or abs(y_i - y_j) > edges.shape[0] * 0.5:
+                if abs(y_i - y_j) < 12 or abs(y_i - y_j) > edges.shape[0] * 0.55:
                     continue
-                # Found a pair of parallel rails separated vertically -> track present
+                # Passed rail + ballast (+ optional sleeper) -> track like image present
                 return True
         return False
     except Exception as e:
@@ -590,21 +720,128 @@ def draw_hud(frame, total_count, intruding_count, stable_count, fps, alert_manag
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, TEXT_COLOR, 3)
 
 
+def draw_density_overlay(frame, count, normal_thr=25, high_thr=50):
+    """Draw overlay matching the image: 72 persons., highly_crowded_platform: ALERT,
+    Density_scale: Normal <25 (green), High 25-50 (yellow), Extremely_high >50 (red).
+    Returns density_level string."""
+    h, w = frame.shape[:2]
+    # Determine level
+    if count < normal_thr:
+        level = "Normal"
+        level_color = DENSITY_NORMAL_COLOR
+    elif count < high_thr:
+        level = "High"
+        level_color = DENSITY_HIGH_COLOR
+    else:
+        level = "Extremely_high"
+        level_color = DENSITY_EXTREME_COLOR
+
+    # --- Top: highly_crowded_platform: ALERT (red large) when High or Extremely ---
+    if count >= high_thr:
+        # like image: red bold at top center
+        alert_text = "highly_crowded_platform: ALERT"
+        # Use larger font, red
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 1.0
+        thickness = 3
+        (tw, th), _ = cv2.getTextSize(alert_text, font, scale, thickness)
+        # centered at top
+        tx = (w - tw) // 2
+        ty = 30
+        # optional black outline for visibility
+        cv2.putText(frame, alert_text, (tx, ty), font, scale, (0, 0, 0), thickness + 3)
+        cv2.putText(frame, alert_text, (tx, ty), font, scale, (0, 0, 255), thickness)
+
+    # --- Left: count persons. like "72 persons." white ---
+    count_text = f"{count} persons."
+    cv2.putText(frame, count_text, (70, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
+    # add subtle shadow
+    cv2.putText(frame, count_text, (71, 111), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 0, 0), 1)
+
+    # --- Right: Density_scale block ---
+    # Position as in image: middle right over tracks
+    # Use smaller font
+    base_x = int(w * 0.62)
+    base_y = int(h * 0.22)
+    # Title
+    cv2.putText(frame, "Density_scale:", (base_x, base_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3)
+    cv2.putText(frame, "Density_scale:", (base_x, base_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 2)
+    # Actually image has black text for title
+    cv2.putText(frame, "Density_scale:", (base_x, base_y), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (5, 5, 5), 2)
+
+    # Normal line
+    cv2.putText(frame, f"Normal: < {normal_thr}", (base_x + 10, base_y + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3)
+    cv2.putText(frame, f"Normal: < {normal_thr}", (base_x + 10, base_y + 35), cv2.FONT_HERSHEY_SIMPLEX, 0.65, DENSITY_NORMAL_COLOR, 2)
+    # High line
+    cv2.putText(frame, f"High: {normal_thr}-{high_thr}", (base_x + 10, base_y + 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3)
+    cv2.putText(frame, f"High: {normal_thr}-{high_thr}", (base_x + 10, base_y + 65), cv2.FONT_HERSHEY_SIMPLEX, 0.65, DENSITY_HIGH_COLOR, 2)
+    # Extremely
+    cv2.putText(frame, f"Extremely_high: > {high_thr}", (base_x + 10, base_y + 95), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3)
+    cv2.putText(frame, f"Extremely_high: > {high_thr}", (base_x + 10, base_y + 95), cv2.FONT_HERSHEY_SIMPLEX, 0.65, DENSITY_EXTREME_COLOR, 2)
+
+    # Optionally highlight current level with background
+    # Draw small indicator next to current level
+    if level == "Normal":
+        iy = base_y + 35
+    elif level == "High":
+        iy = base_y + 65
+    else:
+        iy = base_y + 95
+    cv2.circle(frame, (base_x - 4, iy - 5), 6, level_color, -1)
+    cv2.circle(frame, (base_x - 4, iy - 5), 6, (0, 0, 0), 1)
+
+    return level
+
+
+def draw_boxes_crowd_style(frame, bboxes_dict, confidences_map):
+    """Draw thin red boxes like the reference image: 'person 0.62' with brown background.
+    Mimics highly crowded platform visualization."""
+    for oid, bbox in bboxes_dict.items():
+        x1, y1, x2, y2 = bbox
+        conf = confidences_map.get(oid, 0.0)
+        # thin red box as in image (BGR 0,0,180 approx)
+        box_color = (0, 0, 180)  # dark red
+        cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 1)
+        label = f"person {conf:.2f}"
+        # Use small font similar to image
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.35
+        thickness = 1
+        (tw, th), _ = cv2.getTextSize(label, font, scale, thickness)
+        # background like image: brownish red (BGR 30,30,150) semi-transparent
+        bg_color = (30, 30, 150)
+        # place label at top of box, inside if near top
+        lx = x1
+        ly = y1 - 3
+        if ly - th < 5:
+            ly = y1 + th + 3
+        cv2.rectangle(frame, (lx, ly - th - 2), (lx + tw + 2, ly + 2), bg_color, -1)
+        cv2.putText(frame, label, (lx + 1, ly), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
+def draw_crowd_boxes(frame, bboxes_dict, confidences_map, density_level):
+    """Optional: when Extremely_high, make all boxes red thin like image (0.5px). 
+    Otherwise use normal track-aware colors via draw_tracks."""
+    # This is handled via main's choice; kept for future
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Args & source
 # ---------------------------------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Railway Track Intrusion Detection - detects people entering railway tracks and sends alerts.",
+        description="Railway Track Intrusion Detection - body-based people detection (counts even when face hidden) + track intrusion alerts.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python people_counter.py --source 0
+  python people_counter.py --source 0 --confidence 0.2          # body-based: counts even if face hidden, lower conf for occlusion
   python people_counter.py --source rtsp://user:pass@ip/stream --zone-file track_zone.json
   python people_counter.py --source video.mp4 --zone "0.0,0.65 1.0,0.65 1.0,1.0 0.0,1.0" --alert-dir alerts
   python people_counter.py --source 0 --webhook-url https://example.com/hook --telegram-token 123:ABC --telegram-chat-id -100123
   python people_counter.py --source 0 --auto-detect
   python people_counter.py --source 0 --show-zone   # show red overlay (otherwise hidden: persons GREEN=safe RED=on tracks)
+  Body detection: MobileNetSSD 'person' (full body) + HOG fallback, works when face hidden. Use --confidence 0.15-0.2 for heavy occlusion, --no-hog to disable HOG.
 
 Zone is INVISIBLE by default — only person boxes are colored (GREEN safe, RED intrusion + alarm).
 Calibrate zone interactively: press 'z' then click polygon points on video, press ENTER to confirm, 's' to save, 'v' to toggle visibility.
@@ -654,6 +891,18 @@ Calibrate zone interactively: press 'z' then click polygon points on video, pres
                         help="Disable smart track presence check (by default, checks if rails are visible and pauses alarms if not — prevents home false alarms)")
     parser.add_argument("--track-check-interval", type=int, default=15,
                         help="Check for track presence every N frames (default: 15, lower=more responsive, higher=less CPU)")
+    parser.add_argument("--no-hog", action="store_true",
+                        help="Disable HOG body fallback (by default ON - detects body even when face hidden)")
+    parser.add_argument("--hog-threshold", type=float, default=-0.5,
+                        help="HOG hit threshold (default -0.5 sensitive for face-hidden/body-visible, higher = stricter)")
+    parser.add_argument("--density-normal", type=int, default=25,
+                        help="Normal crowd threshold (default: 25) — < this is Normal (green)")
+    parser.add_argument("--density-high", type=int, default=50,
+                        help="High crowd threshold (default: 50) — 25-50 High (yellow), >50 Extremely high (red) as in image")
+    parser.add_argument("--crowd-alert", action="store_true", default=True,
+                        help="Show density scale + highly_crowded_platform ALERT overlay like image (default: on, use --no-crowd-alert to hide)")
+    parser.add_argument("--no-crowd-alert", action="store_true",
+                        help="Hide crowd density overlay")
     parser.add_argument("--prototxt", type=str, default="models/MobileNetSSD_deploy.prototxt",
                         help="Path to Caffe prototxt")
     parser.add_argument("--caffemodel", type=str, default="models/mobilenet.caffemodel",
@@ -868,8 +1117,9 @@ def main():
             video_writer = cv2.VideoWriter(args.output, fourcc, fps_guess, (w, h))
             print(f"[INFO] Recording output to {args.output} @ {fps_guess:.1f} FPS")
 
-        # detection
-        detections = detect_people(frame, net, args.confidence, args.nms_threshold)
+        # detection - body-based (face hidden still counts)
+        detections = detect_people(frame, net, args.confidence, args.nms_threshold,
+                                   use_hog_fallback=(not args.no_hog), hog_threshold=args.hog_threshold)
         rects = [b for b, _ in detections]
         confs_list = [c for _, c in detections]
 
@@ -974,10 +1224,39 @@ def main():
         # Drawing
         # zone - hidden by default; only person boxes indicate status. Show if toggled or calibrating.
         draw_zone(frame, zone_pts_px, is_alert=is_intrusion_active and track_present, show_zone=show_zone, calibrate_mode=calibrate_mode)
-        # tracks - GREEN safe, RED on tracks (intruding) — RED only if track_present
-        draw_tracks(frame, bboxes, objects, intruding_ids, confidences_map, zone_pts_px)
+        # boxes: will be drawn after density level computed (need crowd_level first)
+        # compute crowd level early for box style choice
+        show_crowd = not args.no_crowd_alert
+        if show_crowd:
+            total_for_density = len(objects)
+            # temporary compute level without drawing yet
+            if total_for_density < args.density_normal:
+                crowd_level = "Normal"
+            elif total_for_density < args.density_high:
+                crowd_level = "High"
+            else:
+                crowd_level = "Extremely_high"
+        else:
+            crowd_level = None
+
+        if show_crowd and crowd_level in ("High", "Extremely_high"):
+            # For highly crowded platform, mimic image: all persons thin red "person 0.xx"
+            draw_boxes_crowd_style(frame, bboxes, confidences_map)
+            # also keep intruding emphasis? crowd red already covers, but add flashing for track intrusion on top
+            if track_present and len(intruding_ids) > 0:
+                # highlight intruding with thicker red
+                for oid in intruding_ids:
+                    if oid in bboxes:
+                        x1,y1,x2,y2 = bboxes[oid]
+                        cv2.rectangle(frame, (x1,y1),(x2,y2), INTRUSION_COLOR, 2)
+        else:
+            # normal track-aware: GREEN safe, RED on tracks (intruding) — RED only if track_present
+            draw_tracks(frame, bboxes, objects, intruding_ids, confidences_map, zone_pts_px)
         # HUD including alert banner (show track presence)
         draw_hud(frame, len(objects), len(intruding_ids), stable_count, fps, alert_mgr, is_alert=is_intrusion_active and track_present and (consecutive_intrusion_frames % 10 < 5), track_present=track_present)
+        # Density overlay like image — draw AFTER HUD so text is on top of bar
+        if show_crowd:
+            draw_density_overlay(frame, len(objects), normal_thr=args.density_normal, high_thr=args.density_high)
 
         # calibration overlay
         if calibrate_mode:
